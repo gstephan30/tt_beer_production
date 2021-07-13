@@ -2,7 +2,11 @@
 title: "TBB Beer Production"
 author: "Stephan"
 date: "`r format(Sys.Date(), '%b %d, %Y')`"
-output: github_document
+output: 
+  github_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
 ---
 
 Hi, I am analysing tidytuesday, data can be found [here](https://github.com/rfordatascience/tidytuesday/tree/master/data/2020/2020-03-31).
@@ -10,6 +14,8 @@ Hi, I am analysing tidytuesday, data can be found [here](https://github.com/rfor
 ![Beer Production](pics/photo-1445140463371-d8036feedc2f.jpg)
 Photo by <a href="https://unsplash.com/@martz90?utm_source=unsplash&utm_medium=referral&utm_content=creditCopyText">Martin Kníže</a> on <a href="https://unsplash.com/s/photos/beer-production?utm_source=unsplash&utm_medium=referral&utm_content=creditCopyText">Unsplash</a>
   
+
+# Data exploration
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, dpi = 96, message = FALSE, warning = FALSE)
@@ -32,7 +38,7 @@ my_theme <- theme(strip.background = element_rect(fill = "#152238"),
         axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
 ```
 
-What ingredients are used in US beer production?
+## What ingredients are used in US beer production?
 
 ```{r}
 brewing_materials %>%
@@ -61,8 +67,12 @@ brewing_materials %>%
        title = "Monthly used ingredients over time") +
   theme(legend.position = "none") +
   my_theme
+```
+
+__Focus: Malt and Sugar & Syrups are besides hops the most used ingredients but they seem to be correlated.__
 
 
+```{r}
 brewing_materials %>%
   filter(str_detect(material_type, "Total.*products")) %>%
   mutate(type = fct_reorder(type, month_current, sum)) %>%
@@ -77,7 +87,7 @@ brewing_materials %>%
   my_theme
 ```
 
-### Brewer size distribution
+## Brewer size distribution
 
 ```{r}
 brewer_size %>%
@@ -110,7 +120,7 @@ brewing_materials %>%
   ggsci::scale_color_lancet()
 ```
 
-### Where is beer produced?
+## Where is beer produced?
 
 
 ```{r}
@@ -150,3 +160,116 @@ states_joined %>%
        fill = "% consumed") 
 ```
 
+
+
+# Predicting relationship of Malt and Sugar & Syrup for capacity building
+
+```{r}
+library(tidymodels)
+
+brewing_filtered <- brewing_materials %>%
+  filter(
+    type %in% c(
+      "Malt and malt products",
+      "Sugar and syrups",
+      "Hops (dry)"
+    ),
+    year < 2016,
+    !(month == 12 & year %in% 2014:2015)
+  ) %>%
+  mutate(
+    date = paste0(year, "-", month, "-01"),
+    date = lubridate::ymd(date)
+  )
+
+brewing_materials_wide <- brewing_filtered %>%
+  select(date, type, month_current) %>%
+  pivot_wider(
+    names_from = type,
+    values_from = month_current
+  ) %>%
+  janitor::clean_names()
+
+g1 <- brewing_materials_wide %>%
+  ggplot(aes(malt_and_malt_products, sugar_and_syrups)) +
+  geom_smooth(method = "lm") +
+  geom_point() +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Predicting relation of sugar and malt usage",
+       subtitle = "Model: linear regression",
+       x = "Malt products",
+       y = "Sugar products")
+
+beer_fit <- lm(sugar_and_syrups ~ 0 + malt_and_malt_products,
+  data = brewing_materials_wide
+)
+
+g2 <- tidy(beer_fit, conf.int = TRUE) %>% 
+  mutate(label = c("Malt products")) %>% 
+  ggplot(aes(estimate, label, xmin = conf.low, xmax = conf.high)) +
+  geom_point() +
+  geom_errorbarh(height = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(title = "Beer use more sugar when they use more malt!",
+       subtitle = "Explicity 0.21 more sugar barrels peer beer barrel.",
+       y = "")
+
+library(patchwork)
+g1 / g2
+```
+
+
+## Resampling and Model evaluation
+
+```{r}
+# 1000 resamples with bootstrapping
+set.seed(2021)
+beer_boot <- bootstraps(brewing_materials_wide, times = 1e3, apparent = TRUE)
+
+if(!file.exists("models.RData")) {
+  beer_models <- beer_boot %>%
+  mutate(
+    model = map(splits, ~lm(sugar_and_syrups ~ 0 + malt_and_malt_products, data = .)),
+    coef_info = map(model, tidy)
+  )
+  save(beer_models, file = "models.RData")
+} else {
+  load("models.RData")
+}
+
+beer_coefs <- beer_models %>%
+  unnest(coef_info)
+
+beer_coefs %>%
+  mutate(ind = 1) %>% 
+  ggplot(aes(estimate, fill = ind)) +
+  geom_histogram() +
+  theme(legend.position = "none") 
+
+if(!file.exists("model_aug.RData")) {
+  beer_aug <- beer_models %>%
+    sample_n(200) %>%
+    mutate(augmented = map(model, augment)) %>%
+    unnest(augmented)
+  save(beer_aug, file = "model_aug.RData")
+} else {
+  load("model_aug.RData")
+}
+
+beer_aug %>% 
+  mutate(ind = 1) %>% 
+  ggplot(aes(malt_and_malt_products, sugar_and_syrups, color = ind)) +
+  geom_line(aes(y = .fitted, group = id), alpha = .1) +
+  geom_point() +
+  labs(title = "1000 predictions of the relation for sugar and malt usage",
+       subtitle = "Model: linear regression with resampling",
+       x = "Malt products",
+       y = "Sugar products") +
+  theme(legend.position = "none") +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma)
+
+```
+
+With this model the capacity of used sugar for the usage of malt can be predicted.
